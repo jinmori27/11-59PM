@@ -1,0 +1,55 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (large files)
+data/
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.bmp
+
+# Model weights (use Git LFS)
+weights/
+*.pt
+*.pth
+*.onnx
+
+# Outputs
+outputs/
+*.log
+
+# Wandb
+wandb/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Checkpoints (except best/latest which should be in Git LFS)
+*.pt
+!weights/best.pt
+!weights/latest.pt

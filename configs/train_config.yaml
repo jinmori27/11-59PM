@@ -1,0 +1,44 @@
+# KLA Hackathon Training Configuration
+# Semiconductor Image Restoration with NAFNet
+
+# Model Configuration
+model_type: "nafnet"          # nafnet or nafnet_local
+scale: 2                      # Upscale factor (2 or 4)
+width: 48                     # Base channel width
+enc_blks: [2, 2, 4, 8]       # Encoder blocks per level
+middle_blks: 12               # Middle blocks
+dec_blks: [2, 2, 2, 2]       # Decoder blocks per level
+
+# Training Configuration
+epochs: 50                    # Total epochs
+batch_size: 16                # Batch size per GPU
+num_workers: 4                # DataLoader workers
+patch_size: 256               # HR patch size for training
+val_split: 0.1                # Validation split (if no separate val dir)
+cache: false                  # Cache images in memory
+
+# Optimization
+lr: 2e-4                      # Initial learning rate
+min_lr: 1e-6                  # Minimum LR (cosine annealing)
+weight_decay: 1e-4            # Weight decay
+mixed_precision: true         # Use FP16 mixed precision
+
+# Loss Weights
+loss:
+  l1_weight: 1.0
+  perceptual_weight: 0.1
+  ssim_weight: 0.05
+  edge_weight: 0.1
+  charbonnier_weight: 0.0
+  use_perceptual: true
+  use_ssim: true
+  use_edge: true
+
+# Logging & Checkpointing
+log_interval: 50              # Log every N batches
+save_interval: 10             # Save checkpoint every N epochs
+output_dir: "weights"         # Checkpoint output directory
+
+# Wandb (optional)
+wandb_project: "kla-restoration"
+wandb_run_name: null
