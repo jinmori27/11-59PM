@@ -306,9 +306,15 @@ def create_dataloaders(
     val_split: float = 0.1,
     cache: bool = False,
     gt_subdir: str = 'GT',
-    lr_subdir: str = 'NoisyLR'
+    lr_subdir: str = 'NoisyLR',
+    synth_ratio: float = 0.0
 ) -> Tuple[DataLoader, DataLoader]:
-    """Create train and validation dataloaders for .npy data"""
+    """Create train and validation dataloaders for .npy data.
+
+    synth_ratio: fraction of *additional* synthetic OOD pairs mixed into the
+    training set (e.g. 0.25 -> 1 synthetic pair per 4 real pairs). Validation
+    always stays real-only.
+    """
     # Two independent dataset instances so augment settings don't leak between
     # splits (a shared dataset can't have augment on for train and off for val)
     train_dataset = SemiconductorDataset(
@@ -340,6 +346,16 @@ def create_dataloaders(
     val_dataset.pairs = all_pairs[:val_size]
     train_dataset.pairs = all_pairs[val_size:]
     print(f"Split: {len(train_dataset.pairs)} train, {len(val_dataset.pairs)} val")
+
+    # Mix in the infinite synthetic OOD curriculum (train only)
+    if synth_ratio > 0:
+        from torch.utils.data import ConcatDataset
+        from .ood_synth import SyntheticPairsDataset
+        n_synth = int(len(train_dataset.pairs) * synth_ratio)
+        synth_dataset = SyntheticPairsDataset(length=n_synth, size=patch_size, scale=scale)
+        train_dataset = ConcatDataset([train_dataset, synth_dataset])
+        print(f"Synthetic OOD curriculum: +{n_synth} procedural pairs "
+              f"(synth_ratio={synth_ratio})")
 
     train_loader = DataLoader(
         train_dataset,

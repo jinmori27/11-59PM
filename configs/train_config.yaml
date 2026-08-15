@@ -2,12 +2,14 @@
 # Semiconductor Image Restoration with NAFNet
 
 # Model Configuration
-model_type: "nafnet"          # nafnet or nafnet_local
-scale: 2                      # Upscale factor (2 or 4)
-width: 48                     # Base channel width
-enc_blks: [2, 2, 4, 8]       # Encoder blocks per level
-middle_blks: 12               # Middle blocks
-dec_blks: [2, 2, 2, 2]       # Decoder blocks per level
+model_type: "diag_nafnet"      # diag_nafnet (self-diagnosing + uncertainty) | nafnet | nafnet_local
+scale: 2                       # Upscale factor (both dataset variants are 2x)
+width: 48                      # Base channel width
+enc_blks: [2, 2, 4, 8]        # Encoder blocks per level
+middle_blks: 12                # Middle blocks
+dec_blks: [2, 2, 2, 2]        # Decoder blocks per level
+use_film: true                 # Degradation-conditioned FiLM layers (diag_nafnet)
+use_uncertainty: true          # Per-pixel uncertainty head (diag_nafnet)
 
 # Training Configuration
 epochs: 100                   # Total epochs
@@ -16,12 +18,14 @@ num_workers: 4                # DataLoader workers
 patch_size: 256               # HR patch size for training
 val_split: 0.1                # Validation split (if no separate val dir)
 cache: false                  # Cache images in memory
+synth_ratio: 0.25             # Extra synthetic OOD pairs per real pair (0 disables)
 
 # Optimization
 lr: 2e-4                      # Initial learning rate
 min_lr: 1e-6                  # Minimum LR (cosine annealing)
 weight_decay: 1e-4            # Weight decay
 mixed_precision: true         # Use FP16 mixed precision
+ema_decay: 0.999              # Weight EMA for best checkpoint (0 disables)
 
 # Loss Weights
 loss:
@@ -30,6 +34,7 @@ loss:
   ssim_weight: 0.05
   edge_weight: 0.1
   charbonnier_weight: 0.0
+  uncertainty_weight: 0.05    # Heteroscedastic NLL (trains the uncertainty head)
   use_perceptual: true
   use_ssim: true
   use_edge: true

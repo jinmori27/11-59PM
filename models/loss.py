@@ -120,10 +120,27 @@ class CharbonnierLoss(nn.Module):
         return loss
 
 
+class HeteroscedasticNLL(nn.Module):
+    """Pixel-wise NLL under a Laplace likelihood: |err|/sigma + 0.5*log(sigma^2).
+
+    Trains the model's uncertainty head: sigma grows where errors are
+    systematically large, giving a calibrated per-pixel confidence map.
+    """
+    def __init__(self, clamp_min: float = -12.0, clamp_max: float = 4.0):
+        super().__init__()
+        self.clamp_min = clamp_min
+        self.clamp_max = clamp_max
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        logvar = logvar.clamp(self.clamp_min, self.clamp_max)
+        err = (pred - target).abs()
+        return (err / torch.exp(0.5 * logvar) + 0.5 * logvar).mean()
+
+
 class CompositeLoss(nn.Module):
     """
     Composite Loss for Semiconductor Image Restoration
-    L_total = w1*L1 + w2*Perceptual + w3*SSIM + w4*Edge + w5*Charbonnier
+    L_total = w1*L1 + w2*Perceptual + w3*SSIM + w4*Edge + w5*Charbonnier + w6*NLL
     """
     def __init__(
         self,
@@ -132,6 +149,7 @@ class CompositeLoss(nn.Module):
         ssim_weight: float = 0.05,
         edge_weight: float = 0.1,
         charbonnier_weight: float = 0.0,
+        uncertainty_weight: float = 0.05,
         use_perceptual: bool = True,
         use_ssim: bool = True,
         use_edge: bool = True
@@ -142,9 +160,11 @@ class CompositeLoss(nn.Module):
         self.ssim_weight = ssim_weight
         self.edge_weight = edge_weight
         self.charbonnier_weight = charbonnier_weight
+        self.uncertainty_weight = uncertainty_weight
 
         self.l1 = nn.L1Loss()
         self.charbonnier = CharbonnierLoss()
+        self.nll = HeteroscedasticNLL()
 
         self.use_perceptual = use_perceptual
         self.use_ssim = use_ssim
@@ -157,7 +177,7 @@ class CompositeLoss(nn.Module):
         if use_edge:
             self.edge = EdgeLoss()
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> dict:
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, logvar: torch.Tensor = None) -> dict:
         losses = {}
 
         # L1 Loss
@@ -188,6 +208,12 @@ class CompositeLoss(nn.Module):
             edge_loss = self.edge(pred, target)
             losses['edge'] = edge_loss
             total += self.edge_weight * edge_loss
+
+        # Heteroscedastic NLL (requires the model's uncertainty head)
+        if logvar is not None and self.uncertainty_weight > 0:
+            nll_loss = self.nll(pred, target, logvar)
+            losses['nll'] = nll_loss
+            total += self.uncertainty_weight * nll_loss
 
         losses['total'] = total
         return losses

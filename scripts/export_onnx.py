@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from models import create_model
+from models import create_model, create_model_from_config
 
 
 def export_onnx(
@@ -43,15 +43,7 @@ def export_onnx(
 
     # Extract config from checkpoint
     if 'config' in checkpoint:
-        config = checkpoint['config']
-        model = create_model(
-            model_type=config.get('model_type', model_type),
-            scale=config.get('scale', scale),
-            width=config.get('width', 48),
-            enc_blks=config.get('enc_blks', [2, 2, 4, 8]),
-            middle_blks=config.get('middle_blks', 12),
-            dec_blks=config.get('dec_blks', [2, 2, 2, 2])
-        )
+        model = create_model_from_config(checkpoint['config'], model_type_default=model_type)
     else:
         model = create_model(model_type=model_type, scale=scale)
 

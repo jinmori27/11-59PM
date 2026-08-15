@@ -157,25 +157,60 @@ KLA-Hackathon/
     └── explore_data.ipynb    # Data exploration
 ```
 
-## ������ Model Architecture: NAFNet
+## Model Architecture: DiagNAFNet (Self-Diagnosing NAFNet)
 
 **Why NAFNet?**
 - Simple baseline for image restoration (CVPR 2022)
-- No complex attention → fast inference
+- No complex attention -> fast inference
 - Handles denoising + deblurring + super-resolution in one model
 - ~65M params (width 48 config) / ~0.11M params (local variant, width 32)
-- ~10ms inference on H100 (FP16)
 
 **Architecture Details:**
 ```
-Input (1, H, W) → Intro Conv → Encoder (4 levels) → Middle (12 blocks)
-                                                    → Decoder (4 levels + skips)
-                                                    → Ending Conv → Output (1, H×scale, W×scale)
+Input (1, H, W) -> Intro Conv -> Encoder (4 levels) -> Middle (12 blocks)
+                                                    -> Decoder (4 levels + skips)
+                                                    -> Ending Conv -> Output (1, H x scale, W x scale)
 ```
-- **Upscaling**: PixelShuffle-based learned 2× upsampling (both dataset variants, 128→256 and 256→512, are 2×)
+- **Upscaling**: PixelShuffle-based learned 2x upsampling (both dataset variants, 128->256 and 256->512, are 2x)
 - **SimpleGate**: Channel-wise gating instead of attention
 - **LayerNorm2d**: Channel-wise normalization
-- **PixelShuffle**: Learned upsampling
+
+### Out-of-the-Box Features
+
+**1. Self-Diagnosing Restoration (degradation conditioning)**
+A small degradation encoder looks at the input first and estimates how corrupted
+it is (speckle/Gaussian severity proxies), then conditions the restorer through
+FiLM layers. The model adapts its behaviour per image instead of one-size-fits-all.
+
+**2. Per-Pixel Uncertainty (heteroscedastic NLL loss)**
+The model outputs a per-pixel confidence map alongside the restoration - flag
+*where* the result is unreliable. Enable at inference with `--save_uncertainty`
+to write JET heatmaps next to outputs. Semiconductor QC use case: prioritize
+human review of high-uncertainty regions.
+
+**3. Uncertainty-Gated Cascade Inference**
+Run a small fast model on everything; escalate only the images it is unsure
+about to the big model. Quality of the big model, speed close to the small one:
+```bash
+python scripts/evaluate.py --input_dir test --output_dir out     --weights weights/fast_diag.pt --weights2 weights/best.pt
+```
+
+**4. Infinite Synthetic OOD Curriculum**
+`data/ood_synth.py` procedurally generates never-repeating textures (fractal
+fBm, particle fields, gratings, circuit-like geometry, speckle fields) and
+runs them through the physics degradation pipeline at randomized severities.
+Mix into training with `synth_ratio` (default 0.25) - targets the
+out-of-distribution half of the test set.
+
+**5. Fast Batched Inference Pipeline + Geometric Self-Ensemble**
+The evaluation script's default path batches uniform-size inputs, keeps FP16
+on GPU, and writes images on a thread pool (the benchmark counts I/O time).
+`--tta` averages 8 geometric views for a free quality bump when speed is not
+the priority.
+
+**6. EMA Weights**
+Training maintains an exponential moving average of weights, validated
+separately each epoch; `best.pt` stores whichever (raw vs EMA) validates better.
 
 ## ��� Loss Function
 

@@ -19,7 +19,7 @@ from tqdm import tqdm
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from models import NAFNet, CompositeLoss, create_model, create_loss
+from models import NAFNet, CompositeLoss, create_model, create_model_from_config, create_loss
 from data import create_dataloaders
 
 
@@ -48,6 +48,22 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
+class EMA:
+    """Exponential moving average of model weights (evaluated separately;
+    often a free quality bump at test time)."""
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+    @torch.no_grad()
+    def update(self, model: nn.Module):
+        for k, v in model.state_dict().items():
+            if v.dtype.is_floating_point:
+                self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=1 - self.decay)
+            else:
+                self.shadow[k].copy_(v)
+
+
 def load_config(config_path: str) -> Dict[str, Any]:
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -62,16 +78,21 @@ def save_checkpoint(
     epoch: int,
     best_val_loss: float,
     config: Dict,
-    path: Path
+    path: Path,
+    ema: 'EMA' = None,
+    use_ema: bool = False
 ):
-    """Save training checkpoint"""
+    """Save training checkpoint. When use_ema=True and an EMA is provided,
+    the saved model_state_dict is the EMA (averaged) weights."""
+    state_dict = ema.shadow if (use_ema and ema is not None) else model.state_dict()
     checkpoint = {
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': state_dict,
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
         'scaler_state_dict': scaler.state_dict() if scaler else None,
         'best_val_loss': best_val_loss,
+        'uses_ema': use_ema and ema is not None,
         'config': config
     }
     torch.save(checkpoint, path)
@@ -83,7 +104,7 @@ def load_checkpoint(
     optimizer: optim.Optimizer = None,
     scheduler = None,
     scaler: GradScaler = None,
-    device: str = 'cuda'
+    device: str = 'cpu'
 ) -> tuple:
     """Load training checkpoint"""
     checkpoint = torch.load(path, map_location=device)
@@ -99,6 +120,15 @@ def load_checkpoint(
         scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
     return start_epoch, best_val_loss
+
+
+def _forward_with_aux(model: nn.Module, x: torch.Tensor):
+    """Runs the model; returns (restored, logvar) where logvar is None for
+    models without an uncertainty head (plain NAFNet etc.)."""
+    if hasattr(model, 'forward_with_aux'):
+        restored, logvar, _sigmas = model.forward_with_aux(x)
+        return restored, logvar
+    return model(x), None
 
 
 def train_one_epoch(
@@ -125,8 +155,8 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         with autocast(enabled=scaler is not None):
-            restored = model(degraded)
-            losses = criterion(restored, ground_truth)
+            restored, logvar = _forward_with_aux(model, degraded)
+            losses = criterion(restored, ground_truth, logvar=logvar)
             loss = losses['total']
 
         if scaler is not None:
@@ -136,6 +166,9 @@ def train_one_epoch(
         else:
             loss.backward()
             optimizer.step()
+
+        if ema is not None:
+            ema.update(model)
 
         # Accumulate losses
         batch_size = degraded.size(0)
@@ -174,8 +207,8 @@ def validate(
             degraded = batch['degraded'].to(device, non_blocking=True)
             ground_truth = batch['ground_truth'].to(device, non_blocking=True)
 
-            restored = model(degraded)
-            losses = criterion(restored, ground_truth)
+            restored, logvar = _forward_with_aux(model, degraded)
+            losses = criterion(restored, ground_truth, logvar=logvar)
 
             batch_size = degraded.size(0)
             total_loss += losses['total'].item() * batch_size
@@ -231,20 +264,14 @@ def main():
         patch_size=config.get('patch_size', 256),
         scale=config.get('scale', 2),
         val_split=config.get('val_split', 0.1),
-        cache=config.get('cache', False)
+        cache=config.get('cache', False),
+        synth_ratio=config.get('synth_ratio', 0.0)
     )
     print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 
     # Model
     print("Creating model...")
-    model = create_model(
-        model_type=config.get('model_type', 'nafnet'),
-        scale=config.get('scale', 2),
-        width=config.get('width', 48),
-        enc_blks=config.get('enc_blks', [2, 2, 4, 8]),
-        middle_blks=config.get('middle_blks', 12),
-        dec_blks=config.get('dec_blks', [2, 2, 2, 2])
-    ).to(device)
+    model = create_model_from_config(config).to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {total_params / 1e6:.2f}M")
@@ -269,6 +296,10 @@ def main():
     # Mixed precision
     scaler = GradScaler() if config.get('mixed_precision', True) and device.type == 'cuda' else None
 
+    # EMA of weights (validated separately; best checkpoint may use it)
+    ema_decay = config.get('ema_decay', 0.999)
+    ema = EMA(model, decay=ema_decay) if ema_decay > 0 else None
+
     # Resume
     start_epoch = 0
     best_val_loss = float('inf')
@@ -292,6 +323,17 @@ def main():
 
         # Validate
         val_losses = validate(model, val_loader, criterion, device)
+
+        # Also validate the EMA weights; best checkpoint = better of the two
+        use_ema_for_best = False
+        if ema is not None:
+            raw_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            model.load_state_dict(ema.shadow)
+            ema_val_losses = validate(model, val_loader, criterion, device)
+            model.load_state_dict(raw_state)
+            if ema_val_losses['total'] < val_losses['total']:
+                val_losses = ema_val_losses
+                use_ema_for_best = True
 
         # Scheduler step
         scheduler.step()
@@ -323,9 +365,10 @@ def main():
             best_val_loss = val_losses['total']
             save_checkpoint(
                 model, optimizer, scheduler, scaler, epoch, best_val_loss, config,
-                output_dir / 'best.pt'
+                output_dir / 'best.pt', ema=ema, use_ema=use_ema_for_best
             )
-            print(f"  -> New best model saved! Val loss: {best_val_loss:.4f}")
+            ema_tag = " (EMA weights)" if use_ema_for_best else ""
+            print(f"  -> New best model saved!{ema_tag} Val loss: {best_val_loss:.4f}")
 
         # Save latest
         save_checkpoint(

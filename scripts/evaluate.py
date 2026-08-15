@@ -35,7 +35,7 @@ from tqdm import tqdm
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from models import create_model
+from models import create_model, create_model_from_config
 
 
 class TiledInference:
@@ -134,15 +134,7 @@ def load_model(weights_path: str, device: str, model_type: str = 'nafnet') -> to
 
     # Extract config from checkpoint if available
     if 'config' in checkpoint:
-        config = checkpoint['config']
-        model = create_model(
-            model_type=config.get('model_type', model_type),
-            scale=config.get('scale', 2),
-            width=config.get('width', 48),
-            enc_blks=config.get('enc_blks', [2, 2, 4, 8]),
-            middle_blks=config.get('middle_blks', 12),
-            dec_blks=config.get('dec_blks', [2, 2, 2, 2])
-        )
+        model = create_model_from_config(checkpoint['config'], model_type_default=model_type)
     else:
         # Default config
         model = create_model(model_type=model_type, scale=2)
@@ -190,6 +182,60 @@ def postprocess_tensor(tensor: torch.Tensor) -> np.ndarray:
     img = np.clip(img, 0, 1)
     img = (img * 255).astype(np.uint8)
     return img
+
+
+def _tta_variants(x: torch.Tensor):
+    """8 geometric views (identity, flips, rot90s, transpose). Square inputs only."""
+    yield 'id', x
+    yield 'fh', torch.flip(x, dims=[2])
+    yield 'fw', torch.flip(x, dims=[3])
+    for k in (1, 2, 3):
+        yield f'rot{k}', torch.rot90(x, k, dims=(2, 3))
+    yield 'tr', x.transpose(2, 3)
+
+
+def _tta_inverse(name: str, y: torch.Tensor) -> torch.Tensor:
+    if name == 'id':
+        return y
+    if name == 'fh':
+        return torch.flip(y, dims=[2])
+    if name == 'fw':
+        return torch.flip(y, dims=[3])
+    if name.startswith('rot'):
+        return torch.rot90(y, -int(name[3]), dims=(2, 3))
+    return y.transpose(2, 3)  # 'tr'
+
+
+def run_model(model: torch.nn.Module, x: torch.Tensor, tta: bool = False):
+    """Forward pass; returns (output, logvar_or_None, sigma_proxies_or_None).
+
+    tta=True averages the 8 geometric self-ensemble views (free quality,
+    8x compute - meant for the quality run, not the speed run).
+    """
+    has_aux = hasattr(model, 'forward_with_aux')
+    if tta:
+        total = None
+        for name, v in _tta_variants(x):
+            y = model.forward_with_aux(v)[0] if has_aux else model(v)
+            y = _tta_inverse(name, y)
+            total = y if total is None else total + y
+        return total / 8.0, None, None
+    if has_aux:
+        return model.forward_with_aux(x)
+    return model(x), None, None
+
+
+def _write_output(out_t: torch.Tensor, output_path: str, logvar: torch.Tensor = None):
+    """Save restored image (and an optional JET uncertainty heatmap)."""
+    img = postprocess_tensor(out_t)
+    cv2.imwrite(output_path, img)
+    if logvar is not None:
+        sigma = torch.exp(0.5 * logvar.float().squeeze()).cpu().numpy()
+        smin, smax = sigma.min(), sigma.max()
+        norm = (sigma - smin) / (smax - smin + 1e-8)
+        heat = cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        base, ext = os.path.splitext(output_path)
+        cv2.imwrite(f"{base}_unc{ext}", heat)
 
 
 def infer_image(
@@ -254,10 +300,15 @@ Examples:
     parser.add_argument('--output_dir', type=str, required=True, help='Directory to save restored images')
     parser.add_argument('--weights', type=str, required=True, help='Path to model weights (.pt file)')
     parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'], help='Inference device')
-    parser.add_argument('--model_type', type=str, default='nafnet', choices=['nafnet', 'nafnet_local'], help='Model architecture')
-    parser.add_argument('--tile_size', type=int, default=256, help='Tile size for tiled inference (0 to disable)')
+    parser.add_argument('--model_type', type=str, default='nafnet', choices=['nafnet', 'nafnet_local', 'diag_nafnet'], help='Model architecture')
+    parser.add_argument('--tile_size', type=int, default=0, help='Tile size for tiled inference (0 = batched fast path, recommended)')
     parser.add_argument('--overlap', type=int, default=32, help='Overlap between tiles')
     parser.add_argument('--fp16', action='store_true', help='Use FP16 inference (faster on GPU)')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for the batched inference path')
+    parser.add_argument('--tta', action='store_true', help='Geometric self-ensemble (8 views averaged; +quality, 8x compute; square inputs)')
+    parser.add_argument('--weights2', type=str, default=None, help='Optional big model for uncertainty-gated cascade (needs --weights to be a DiagNAFNet)')
+    parser.add_argument('--cascade_threshold', type=float, default=0.05, help='Mean predicted sigma above which an image escalates to the big model')
+    parser.add_argument('--save_uncertainty', action='store_true', help='Also save per-pixel uncertainty heatmaps (DiagNAFNet only)')
     parser.add_argument('--ext', type=str, default='png', help='Output image extension')
     parser.add_argument('--recursive', action='store_true', help='Search input_dir recursively')
 
@@ -285,17 +336,25 @@ Examples:
     # Load model
     print(f"Loading model from {weights_path}...")
     model = load_model(str(weights_path), device, args.model_type)
-    print(f"Model loaded: {args.model_type}")
+    loaded_type = 'diag_nafnet' if hasattr(model, 'forward_with_aux') else args.model_type
+    print(f"Model loaded: {loaded_type}")
+
+    # Optional big model for the uncertainty-gated cascade
+    big_model = None
+    if args.weights2:
+        big_model = load_model(args.weights2, device, args.model_type)
+        print(f"Cascade big model loaded: {args.weights2}")
 
     # Enable FP16 if requested
     if args.fp16 and device == 'cuda':
         model.half()
+        if big_model is not None:
+            big_model.half()
         print("FP16 inference enabled")
 
-    # Find input images (default to .npy for KLA dataset, but support other formats)
-    exts = [args.ext] if args.ext != 'npy' else ['npy', 'npz']
-    # Also add image formats
-    for ext in ['jpg', 'jpeg', 'png', 'tif', 'tiff', 'bmp']:
+    # Find input images: always search native .npy/.npz plus common image formats
+    exts = [args.ext] if args.ext in ('npy', 'npz') else [args.ext]
+    for ext in ['npy', 'npz', 'jpg', 'jpeg', 'png', 'tif', 'tiff', 'bmp']:
         if ext not in exts:
             exts.append(ext)
 
@@ -321,50 +380,109 @@ Examples:
         print("No images found! Check input directory and extension.")
         return
 
-    # Determine tiling
-    use_tiling = args.tile_size > 0
+    # ---- Inference ----
+    n_escalated = 0
+    n_images = 0
 
-    # Process images
-    print("\nStarting inference...")
-    times = []
+    if args.tile_size > 0:
+        # Legacy per-image tiled path (for oversized inputs)
+        use_tiling = True
+        print("\nStarting inference (tiled, per-image)...")
+        times = []
+        for img_path in tqdm(image_files, desc="Processing"):
+            rel_path = img_path.relative_to(input_dir)
+            out_path = output_dir / rel_path.with_suffix(f'.{args.ext}')
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                elapsed = infer_image(
+                    model=model,
+                    img_path=str(img_path),
+                    output_path=str(out_path),
+                    device=device,
+                    use_tiling=use_tiling,
+                    tile_size=args.tile_size,
+                    overlap=args.overlap
+                )
+                times.append(elapsed)
+                n_images += 1
+            except Exception as e:
+                print(f"\nError processing {img_path}: {e}")
+                continue
+        wall_time = sum(times)
+        avg_time = wall_time / max(len(times), 1)
+    else:
+        # Batched fast path: uniform-size batches + threaded image writing.
+        # This is the path to use for the H100 end-to-end timing benchmark
+        # (startup + I/O + inference + writes all count).
+        from collections import defaultdict
+        from concurrent.futures import ThreadPoolExecutor
 
-    for img_path in tqdm(image_files, desc="Processing"):
-        # Maintain relative path structure for output
-        rel_path = img_path.relative_to(input_dir)
-        out_path = output_dir / rel_path.with_suffix(f'.{args.ext}')
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        can_cascade = big_model is not None and hasattr(model, 'forward_with_aux')
+        if big_model is not None and not can_cascade:
+            print("WARNING: --weights2 given but primary model has no uncertainty head; "
+                  "cascade disabled, using single model.")
 
-        try:
-            elapsed = infer_image(
-                model=model,
-                img_path=str(img_path),
-                output_path=str(out_path),
-                device=device,
-                use_tiling=use_tiling,
-                tile_size=args.tile_size,
-                overlap=args.overlap
-            )
-            times.append(elapsed)
-        except Exception as e:
-            print(f"\nError processing {img_path}: {e}")
-            continue
+        shape_bins = defaultdict(list)
+        for img_path in image_files:
+            try:
+                t = preprocess_image(str(img_path), 'cpu')
+                shape_bins[t.shape[-2:]].append((img_path, t))
+            except Exception as e:
+                print(f"Error loading {img_path}: {e}")
+
+        print(f"\nStarting inference (batched, batch_size={args.batch_size}, "
+              f"tta={'on' if args.tta else 'off'}, "
+              f"cascade={'on' if can_cascade else 'off'})...")
+        model_dtype = next(model.parameters()).dtype
+
+        t_start = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = []
+            for (h, w), items in sorted(shape_bins.items()):
+                for i in range(0, len(items), args.batch_size):
+                    chunk = items[i:i + args.batch_size]
+                    x = torch.cat([t for _, t in chunk], dim=0).to(device=device, dtype=model_dtype)
+                    with torch.no_grad(), torch.cuda.amp.autocast(enabled=device == 'cuda'):
+                        if can_cascade:
+                            # Screen with the fast model, escalate the unsure ones
+                            y, logvar, _ = run_model(model, x)
+                            score = torch.exp(0.5 * logvar).mean(dim=(1, 2, 3))
+                            hard = score > args.cascade_threshold
+                            if hard.any():
+                                y_big, _, _ = run_model(big_model, x[hard], tta=args.tta)
+                                y[hard] = y_big
+                                n_escalated += int(hard.sum().item())
+                        else:
+                            y, logvar, _ = run_model(model, x, tta=args.tta)
+                    if device == 'cuda':
+                        torch.cuda.synchronize()
+                    lvs = list(logvar) if logvar is not None else [None] * len(chunk)
+                    for (img_path, _), out_t, lv in zip(chunk, y, lvs):
+                        rel_path = img_path.relative_to(input_dir)
+                        out_path = output_dir / rel_path.with_suffix(f'.{args.ext}')
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        futures.append(pool.submit(
+                            _write_output, out_t, str(out_path),
+                            lv if args.save_uncertainty else None
+                        ))
+                        n_images += 1
+            for f in futures:
+                f.result()
+        wall_time = time.perf_counter() - t_start
+        avg_time = wall_time / max(n_images, 1)
 
     # Statistics
-    if times:
-        total_time = sum(times)
-        avg_time = total_time / len(times)
-        fps = len(times) / total_time
-
-        print(f"\n{'='*50}")
-        print(f"Inference Complete!")
-        print(f"Processed: {len(times)} images")
-        print(f"Total time: {total_time:.2f}s")
-        print(f"Average time: {avg_time*1000:.1f}ms/image")
-        print(f"Throughput: {fps:.2f} FPS")
-        print(f"Min time: {min(times)*1000:.1f}ms")
-        print(f"Max time: {max(times)*1000:.1f}ms")
-        print(f"Output saved to: {output_dir}")
-        print(f"{'='*50}")
+    print(f"\n{'='*50}")
+    print(f"Inference Complete!")
+    print(f"Processed: {n_images} images")
+    print(f"Total time: {wall_time:.2f}s")
+    print(f"Average time: {avg_time*1000:.1f}ms/image")
+    print(f"Throughput: {(1.0 / avg_time if avg_time > 0 else 0):.2f} FPS")
+    if can_cascade := (args.tile_size <= 0 and big_model is not None and hasattr(model, 'forward_with_aux')):
+        pct = 100.0 * n_escalated / max(n_images, 1)
+        print(f"Cascade: {n_escalated}/{n_images} images escalated to big model ({pct:.1f}%)")
+    print(f"Output saved to: {output_dir}")
+    print(f"{'='*50}")
 
 
 if __name__ == '__main__':
