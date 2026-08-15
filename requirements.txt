@@ -1,32 +1,33 @@
-# Core ML
-torch==2.4.0
-torchvision==0.19.0
-torchaudio==2.4.0
+# Core ML — loose pins so pre-installed CUDA builds (Kaggle/Colab) are kept
+torch>=2.0
+torchvision>=0.15
+torchaudio>=2.0
+
+# Loss & geometry
+kornia>=0.8
 
 # Image processing
-opencv-python==4.10.0.84
-Pillow==10.4.0
-scikit-image==0.24.0
-albumentations==1.4.15
+opencv-python>=4.9
+albumentations>=1.4
+scikit-image>=0.24
 
 # Utilities
-numpy==1.26.4
-tqdm==4.66.5
-PyYAML==6.0.1
-einops==0.8.0
+numpy>=1.24
+tqdm>=4.66
+PyYAML>=6.0
+einops>=0.8
 
 # Export & Benchmarking
-onnx==1.16.1
-onnxruntime==1.19.2
+onnx>=1.16
+onnxruntime>=1.19
 
 # Logging & Config
-wandb==0.17.6
-hydra-core==1.3.2
+wandb>=0.17
 
 # Metrics
-lpips==0.1.4
+lpips>=0.1.4
 
 # Development
-matplotlib==3.9.1
-jupyter==1.0.0
-ipykernel==6.29.5
+matplotlib>=3.9
+jupyter>=1.0
+ipykernel>=6.29
