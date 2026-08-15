@@ -139,7 +139,8 @@ def train_one_epoch(
     scaler: GradScaler,
     device: str,
     epoch: int,
-    log_interval: int = 50
+    log_interval: int = 50,
+    ema: 'EMA' = None
 ) -> Dict[str, float]:
     """Train for one epoch"""
     model.train()
@@ -319,7 +320,8 @@ def main():
         # Train
         train_losses = train_one_epoch(
             model, train_loader, optimizer, criterion, scaler, device, epoch,
-            log_interval=config.get('log_interval', 50)
+            log_interval=config.get('log_interval', 50),
+            ema=ema
         )
 
         # Validate
