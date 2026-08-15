@@ -10,8 +10,8 @@ middle_blks: 12               # Middle blocks
 dec_blks: [2, 2, 2, 2]       # Decoder blocks per level
 
 # Training Configuration
-epochs: 50                    # Total epochs
-batch_size: 16                # Batch size per GPU
+epochs: 100                   # Total epochs
+batch_size: 8                 # P100 16GB safe (won't OOM overnight)
 num_workers: 4                # DataLoader workers
 patch_size: 256               # HR patch size for training
 val_split: 0.1                # Validation split (if no separate val dir)
