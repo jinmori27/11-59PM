@@ -17,24 +17,20 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+__MACOSX/
 
-# Data (large files)
-data/
-*.png
-*.jpg
-*.jpeg
-*.tif
-*.tiff
-*.bmp
+# Data: ignore dataset arrays, keep source code (*.py)
+data/*
+!data/*.py
 
-# Model weights (use Git LFS)
-weights/
+# Model weights: ignore everything except best/latest (tracked via Git LFS)
 *.pt
 *.pth
 *.onnx
+!weights/best.pt
+!weights/latest.pt
 
-# Outputs
-outputs/
+# Logs
 *.log
 
 # Wandb
@@ -48,8 +44,3 @@ wandb/
 *.temp
 temp/
 tmp/
-
-# Checkpoints (except best/latest which should be in Git LFS)
-*.pt
-!weights/best.pt
-!weights/latest.pt

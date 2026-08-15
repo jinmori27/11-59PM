@@ -241,7 +241,7 @@ class NAFNetLocal(nn.Module):
     Lightweight NAFNet variant for faster inference
     ~200K params, ~5ms on H100
     """
-    def ____init__(
+    def __init__(
         self,
         in_channels: int = 1,
         out_channels: int = 1,

@@ -31,18 +31,15 @@ pip install -r requirements.txt
 
 ### 2. Download Data
 
-Place paired training data in this structure:
+Place paired training data in this structure (`.npy` float32 arrays):
 ```
-data/
-├── train/
-│   ├── degraded/      # 256x256 or 128x128 noisy low-res images
-│   └── ground_truth/  # 512x512 or 256x256 clean high-res images
-��── val/               # Optional: separate validation set
-    ├── degraded/
-    └── ground_truth/
+data_root/                 # any path passed via --data_root
+├── GT/                    # Clean high-res images (256x256 or 512x512), 0-1 range
+└── NoisyLR/               # Noisy low-res images (128x128 or 256x256),
+                           # values may exceed [0,1] due to speckle
 ```
 
-**Note**: Filenames must match between `degraded/` and `ground_truth/`.
+**Note**: Filenames must match between `GT/` and `NoisyLR/`. A random 90/10 train/val split is created automatically (seeded).
 
 ### 3. Train Model
 
@@ -106,7 +103,7 @@ python scripts/evaluate.py \
 - �� Standalone `.py` file (not notebook)
 - �� Accepts `--input_dir` and `--output_dir`
 - �� Loads model, runs inference on all images, saves outputs
-- �� Handles both 256→512 (2x) and 128→256 (4x) automatically
+- �� Handles 128→256 and 256→512 inputs automatically (both are 2× SR)
 - �� Progress bar + timing stats
 - �� No manual edits needed
 
@@ -166,7 +163,7 @@ KLA-Hackathon/
 - Simple baseline for image restoration (CVPR 2022)
 - No complex attention → fast inference
 - Handles denoising + deblurring + super-resolution in one model
-- ~678K params (standard) / ~200K params (local variant)
+- ~65M params (width 48 config) / ~0.11M params (local variant, width 32)
 - ~10ms inference on H100 (FP16)
 
 **Architecture Details:**
@@ -175,7 +172,7 @@ Input (1, H, W) → Intro Conv → Encoder (4 levels) → Middle (12 blocks)
                                                     → Decoder (4 levels + skips)
                                                     → Ending Conv → Output (1, H×scale, W×scale)
 ```
-- **Scale Conditioning**: Single model handles 2× and 4× via learned scale embedding
+- **Upscaling**: PixelShuffle-based learned 2× upsampling (both dataset variants, 128→256 and 256→512, are 2×)
 - **SimpleGate**: Channel-wise gating instead of attention
 - **LayerNorm2d**: Channel-wise normalization
 - **PixelShuffle**: Learned upsampling
@@ -288,4 +285,4 @@ MIT License - See LICENSE file for details.
 
 ---
 
-**For KLA Benchmarking Team**: The evaluation script (`scripts/evaluate.py`) is ready to run as-is. Just provide `--input_dir`, `--output_dir`, and `--weights`. It handles both 2× and 4× super-resolution automatically, supports tiled inference for large images, and outputs timing statistics.
+**For KLA Benchmarking Team**: The evaluation script (`scripts/evaluate.py`) is ready to run as-is. Just provide `--input_dir`, `--output_dir`, and `--weights`. It handles 2× super-resolution (128→256 and 256→512 inputs), supports tiled inference for large images, and outputs timing statistics.

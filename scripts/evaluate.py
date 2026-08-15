@@ -57,6 +57,8 @@ class TiledInference:
         self.device = device
         self.scale = scale
         self.stride = tile_size - overlap
+        # Match model parameter dtype (model may have been converted via .half())
+        self.dtype = next(model.parameters()).dtype
 
     def __call__(self, img_lr: torch.Tensor) -> torch.Tensor:
         """
@@ -69,8 +71,8 @@ class TiledInference:
         h_hr, w_hr = h * self.scale, w * self.scale
 
         # Output accumulator and weight map for blending
-        output = torch.zeros(1, 1, h_hr, w_hr, device=self.device)
-        weight_map = torch.zeros(1, 1, h_hr, w_hr, device=self.device)
+        output = torch.zeros(1, 1, h_hr, w_hr, device=self.device, dtype=self.dtype)
+        weight_map = torch.zeros(1, 1, h_hr, w_hr, device=self.device, dtype=self.dtype)
 
         # Gaussian weight for blending (feather edges)
         weight_kernel = self._gaussian_weight(self.tile_size * self.scale, self.overlap * self.scale)
@@ -94,6 +96,7 @@ class TiledInference:
                     tile_lr = F.pad(tile_lr, (0, pad_w, 0, pad_h), mode='reflect')
 
                 # Inference
+                tile_lr = tile_lr.to(self.dtype)
                 with torch.no_grad(), torch.cuda.amp.autocast(enabled=self.device == 'cuda'):
                     tile_hr = self.model(tile_lr)
 
@@ -107,9 +110,10 @@ class TiledInference:
                 x_hr_end = x_hr_start + tile_hr.shape[3]
 
                 # Accumulate with blending weight
-                w = weight_kernel[:tile_hr.shape[2], :tile_hr.shape[3]]
-                output[:, :, y_hr_start:y_hr_end, x_hr_start:x_hr_end] += tile_hr * w
-                weight_map[:, :, y_hr_start:y_hr_end, x_hr_start:x_hr_end] += w
+                # (named wgt: a bare `w` would shadow the image width unpacked above)
+                wgt = weight_kernel[:tile_hr.shape[2], :tile_hr.shape[3]].to(tile_hr.dtype)
+                output[:, :, y_hr_start:y_hr_end, x_hr_start:x_hr_end] += tile_hr * wgt
+                weight_map[:, :, y_hr_start:y_hr_end, x_hr_start:x_hr_end] += wgt
 
         # Normalize by weight map
         output = output / (weight_map + 1e-8)
@@ -181,7 +185,7 @@ def preprocess_image(img_path: str, device: str) -> torch.Tensor:
 def postprocess_tensor(tensor: torch.Tensor) -> np.ndarray:
     """Convert output tensor to uint8 image"""
     # [-1, 1] -> [0, 1] -> [0, 255]
-    img = tensor.squeeze().cpu().numpy()
+    img = tensor.squeeze().float().cpu().numpy()
     img = (img + 1) / 2
     img = np.clip(img, 0, 1)
     img = (img * 255).astype(np.uint8)
