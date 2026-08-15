@@ -279,18 +279,19 @@ def main():
     # Loss
     criterion = create_loss(config.get('loss', {})).to(device)
 
-    # Optimizer
+    # Optimizer (float() guards: YAML needs a decimal point for scientific
+    # notation, otherwise values like 2e-4 arrive as strings)
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=config.get('lr', 2e-4),
-        weight_decay=config.get('weight_decay', 1e-4),
+        lr=float(config.get('lr', 2e-4)),
+        weight_decay=float(config.get('weight_decay', 1e-4)),
         betas=(0.9, 0.999)
     )
 
     # Scheduler
-    epochs = config.get('epochs', 50)
+    epochs = int(config.get('epochs', 50))
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=epochs, eta_min=config.get('min_lr', 1e-6)
+        optimizer, T_max=epochs, eta_min=float(config.get('min_lr', 1e-6))
     )
 
     # Mixed precision

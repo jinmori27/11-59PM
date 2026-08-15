@@ -21,9 +21,9 @@ cache: false                  # Cache images in memory
 synth_ratio: 0.25             # Extra synthetic OOD pairs per real pair (0 disables)
 
 # Optimization
-lr: 2e-4                      # Initial learning rate
-min_lr: 1e-6                  # Minimum LR (cosine annealing)
-weight_decay: 1e-4            # Weight decay
+lr: 2.0e-4                    # Initial learning rate (NOTE: YAML needs the decimal point, 2e-4 alone parses as a string)
+min_lr: 1.0e-6                # Minimum LR (cosine annealing)
+weight_decay: 1.0e-4          # Weight decay
 mixed_precision: true         # Use FP16 mixed precision
 ema_decay: 0.999              # Weight EMA for best checkpoint (0 disables)
 
