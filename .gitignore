@@ -23,12 +23,10 @@ __MACOSX/
 data/*
 !data/*.py
 
-# Model weights: ignore everything except best/latest (tracked via Git LFS)
+# Model weights: full .pt files are rebuilt at first run from weights/chunks/
 *.pt
 *.pth
 *.onnx
-!weights/best.pt
-!weights/latest.pt
 
 # Logs
 *.log

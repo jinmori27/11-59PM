@@ -33,6 +33,19 @@ are in `results/examples/`.
 
 Checkpoint: `weights/best.pt` (epoch 82, val loss 0.0659, 65.3M parameters).
 
+## Quick start (benchmark entry point)
+
+```bash
+python run.py <input-dir> <output-dir>
+```
+
+Reads every `.npy` in `<input-dir>`, restores it (2x super-resolution +
+denoising), and writes a float32 grayscale `.npy` of the same filename to
+`<output-dir>` (created if missing), values in [0, 1]. Weights ship inside
+the repo (`weights/chunks/`); they are joined into `weights/best.pt`
+automatically on first run. No internet access, keys, or downloads are
+needed at runtime. GPU is used automatically when available.
+
 ## Setup
 
 ```bash
